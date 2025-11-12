@@ -131,7 +131,6 @@ void reader_thread(
         if (samples_read == 0 || infile.eof()) {
             infile.clear();
             infile.seekg(0, std::ios::beg);
-            std::cout << "* Файл закончился, начинаем сначала..." << std::endl;
             continue;
         }
 
@@ -201,9 +200,13 @@ void send_from_file(
     // Счетчики
     size_t total_samples = 0;
     size_t num_tx_samps = 0;
+    size_t underrun_count = 0;
+    size_t total_sent = 0;
     auto start_time = std::chrono::steady_clock::now();
+    auto global_start = std::chrono::steady_clock::now();
 
     std::cout << "* Начинаем передачу..." << std::endl;
+    std::cout << std::endl; // Пустая строка для статистики
 
     while (not stop_signal_called) {
         std::vector<samp_type> buff;
@@ -230,24 +233,33 @@ void send_from_file(
         // Отправляем данные
         num_tx_samps = tx_stream->send(&buff.front(), buff.size(), md);
         if (num_tx_samps < buff.size()) {
-            std::cerr << "Отправлено меньше сэмплов чем запрошено" << std::endl;
+            underrun_count++;
         }
 
         md.start_of_burst = false;
         total_samples += num_tx_samps;
+        total_sent += num_tx_samps;
 
-        // Статистика каждые 5 секунд
+        // Обновляем статистику каждую секунду
         auto now = std::chrono::steady_clock::now();
-        auto time_passed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
-        if (time_passed >= 5) {
-            double rate = total_samples / static_cast<double>(time_passed) / 1e6;
+        auto time_passed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
+        if (time_passed >= 1000) {
+            double rate = total_samples / (static_cast<double>(time_passed) / 1000.0) / 1e6;
             size_t queue_size;
             {
                 std::lock_guard<std::mutex> lock(queue.mutex);
                 queue_size = queue.buffers.size();
             }
-            std::cout << boost::format("Статистика: %.2f MS/s (буферов в очереди: %d)")
-                % rate % queue_size << std::endl;
+
+            auto total_time = std::chrono::duration_cast<std::chrono::seconds>(now - global_start).count();
+            double total_gb = total_sent * sizeof(std::complex<float>) / 1e9;
+
+            // Затираем предыдущую строку и выводим новую статистику
+            std::cout << "\r\033[K"; // Очистить текущую строку
+            std::cout << boost::format("Скорость: %.2f MS/s | Буферов: %2d/32 | Всего: %.2f GB | Время: %d сек | Underrun: %d")
+                % rate % queue_size % total_gb % total_time % underrun_count;
+            std::cout << std::flush;
+
             start_time = now;
             total_samples = 0;
         }
@@ -257,6 +269,9 @@ void send_from_file(
     stop_signal_called = true;
     queue.cv.notify_all();
     reader.join();
+
+    // Переводим строку после статистики
+    std::cout << std::endl;
 
     // Отправляем конец потока
     md.end_of_burst = true;

@@ -20,7 +20,7 @@ all: clean $(TARGET) check-libs
 
 # Компиляция
 $(TARGET): $(SOURCE)
-	@echo "Компиляция с UHD 4.8.0..."
+	@echo "Компиляция с UHD 4.9.0 и Boost 1.83.0..."
 	$(CXX) $(CXXFLAGS) $(UHD_INCLUDE) -o $(TARGET) $(SOURCE) $(LDFLAGS)
 	@echo "Компиляция завершена!"
 	

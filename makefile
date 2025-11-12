@@ -3,8 +3,8 @@
 CXX = g++
 CXXFLAGS = -std=c++14 -O3 -march=native -Wall -Wextra
 
-UHD_INCLUDE = -I/usr/local/include
-UHD_LIB_PATH = -L/usr/local/lib -Wl,-rpath,/usr/local/lib
+UHD_INCLUDE = -I/usr/include
+UHD_LIB_PATH = -L/usr/lib/x86_64-linux-gnu -Wl,-rpath,/usr/lib/x86_64-linux-gnu
 
 LIBS = -luhd -lboost_system -lboost_thread -lboost_program_options -lpthread
 LDFLAGS = $(UHD_LIB_PATH) $(LIBS)

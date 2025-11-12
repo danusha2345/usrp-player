@@ -1,6 +1,6 @@
 #!/bin/bash
-# Точный путь к файлу FPGA
-TARGET="/usr/local/share/uhd/images/usrp_b210_fpga.bin"
+# Точный путь к файлу FPGA (системная установка UHD)
+TARGET="/usr/share/uhd/images/usrp_b210_fpga.bin"
 
 echo "Применяю патч LibreSDR..."
 echo "Целевой файл: $TARGET"

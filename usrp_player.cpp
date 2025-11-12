@@ -25,6 +25,9 @@
 #include <fstream>
 #include <iostream>
 #include <thread>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 
 namespace po = boost::program_options;
 
@@ -46,7 +49,120 @@ std::string format_file_size(size_t size) {
     return str(boost::format("%.2f %s") % size_d % units[unit_index]);
 }
 
-// Функция передачи данных
+// Структура для буферов
+template <typename samp_type>
+struct BufferQueue {
+    std::queue<std::vector<samp_type>> buffers;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool finished = false;
+    size_t max_buffers = 32; // Максимум буферов в очереди
+};
+
+// Функция чтения и конвертации в отдельном потоке
+template <typename samp_type>
+void reader_thread(
+    BufferQueue<samp_type>* queue,
+    const std::string& file,
+    size_t samps_per_buff,
+    bool is_8bit,
+    int bit_shift)
+{
+    std::ifstream infile(file.c_str(), std::ifstream::binary);
+    if (!infile.is_open()) {
+        std::cerr << "Ошибка открытия файла в потоке чтения" << std::endl;
+        return;
+    }
+
+    std::vector<int8_t> buff_8bit;
+    std::vector<int16_t> buff_16bit;
+
+    if (is_8bit) {
+        buff_8bit.resize(samps_per_buff * 2);
+    } else {
+        buff_16bit.resize(samps_per_buff * 2);
+    }
+
+    while (not stop_signal_called) {
+        // Создаём буфер для конвертированных данных
+        std::vector<samp_type> buff(samps_per_buff);
+        size_t samples_read = 0;
+
+        if (is_8bit) {
+            infile.read(reinterpret_cast<char*>(buff_8bit.data()),
+                       buff_8bit.size() * sizeof(int8_t));
+            size_t bytes_read = infile.gcount();
+            samples_read = bytes_read / 2;
+
+            // Конвертируем 8-bit в комплексные float
+            for (size_t i = 0; i < samples_read; i++) {
+                float i_val = static_cast<float>(buff_8bit[i * 2]) / 128.0f;
+                float q_val = static_cast<float>(buff_8bit[i * 2 + 1]) / 128.0f;
+
+                if (bit_shift > 0) {
+                    float scale = 1.0f / (1 << bit_shift);
+                    i_val *= scale;
+                    q_val *= scale;
+                }
+
+                buff[i] = samp_type(i_val, q_val);
+            }
+        } else {
+            infile.read(reinterpret_cast<char*>(buff_16bit.data()),
+                       buff_16bit.size() * sizeof(int16_t));
+            size_t values_read = infile.gcount() / sizeof(int16_t);
+            samples_read = values_read / 2;
+
+            for (size_t i = 0; i < samples_read; i++) {
+                float i_val = static_cast<float>(buff_16bit[i * 2]) / 32768.0f;
+                float q_val = static_cast<float>(buff_16bit[i * 2 + 1]) / 32768.0f;
+
+                if (bit_shift > 0) {
+                    float scale = 1.0f / (1 << bit_shift);
+                    i_val *= scale;
+                    q_val *= scale;
+                }
+
+                buff[i] = samp_type(i_val, q_val);
+            }
+        }
+
+        // Если конец файла - начинаем сначала
+        if (samples_read == 0 || infile.eof()) {
+            infile.clear();
+            infile.seekg(0, std::ios::beg);
+            continue;
+        }
+
+        // Изменяем размер буфера под реальное количество сэмплов
+        buff.resize(samples_read);
+
+        // Добавляем буфер в очередь
+        {
+            std::unique_lock<std::mutex> lock(queue->mutex);
+            // Ждём если очередь заполнена
+            queue->cv.wait(lock, [queue] {
+                return queue->buffers.size() < queue->max_buffers || stop_signal_called;
+            });
+
+            if (stop_signal_called) break;
+
+            queue->buffers.push(std::move(buff));
+        }
+        queue->cv.notify_one();
+    }
+
+    // Помечаем что чтение завершено
+    {
+        std::lock_guard<std::mutex> lock(queue->mutex);
+        queue->finished = true;
+    }
+    queue->cv.notify_one();
+
+    infile.close();
+}
+
+// Функция передачи данных с многопоточной буферизацией
 template <typename samp_type>
 void send_from_file(
     uhd::tx_streamer::sptr tx_stream,
@@ -59,116 +175,91 @@ void send_from_file(
     md.start_of_burst = true;
     md.end_of_burst = false;
     md.has_time_spec = false;
-    
-    std::ifstream infile(file.c_str(), std::ifstream::binary);
-    if (!infile.is_open()) {
+
+    // Проверяем файл
+    std::ifstream test_file(file.c_str(), std::ifstream::binary);
+    if (!test_file.is_open()) {
         throw std::runtime_error("Не удалось открыть файл: " + file);
     }
-    
-    // Получаем размер файла
-    infile.seekg(0, std::ios::end);
-    size_t file_size = infile.tellg();
-    infile.seekg(0, std::ios::beg);
-    
+    test_file.seekg(0, std::ios::end);
+    size_t file_size = test_file.tellg();
+    test_file.close();
+
     std::cout << "* Размер файла: " << format_file_size(file_size) << std::endl;
-    
-    // Буферы
-    std::vector<samp_type> buff(samps_per_buff);
-    std::vector<int8_t> buff_8bit;
-    if (is_8bit) {
-        buff_8bit.resize(samps_per_buff * 2); // I и Q по 8 бит
-    }
-    
+
+    // Создаём очередь буферов
+    BufferQueue<samp_type> queue;
+
+    // Запускаем поток чтения
+    std::cout << "* Запуск многопоточной буферизации..." << std::endl;
+    std::thread reader(reader_thread<samp_type>, &queue, file, samps_per_buff, is_8bit, bit_shift);
+
+    // Ждём заполнения начальных буферов
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
     // Счетчики
     size_t total_samples = 0;
     size_t num_tx_samps = 0;
     auto start_time = std::chrono::steady_clock::now();
-    
+
     std::cout << "* Начинаем передачу..." << std::endl;
-    
+
     while (not stop_signal_called) {
-        size_t samples_read = 0;
-        
-        if (is_8bit) {
-            // Читаем 8-битные IQ данные
-            infile.read(reinterpret_cast<char*>(buff_8bit.data()), 
-                       buff_8bit.size() * sizeof(int8_t));
-            size_t bytes_read = infile.gcount();
-            samples_read = bytes_read / 2; // Пары I/Q
-            
-            // Конвертируем 8-bit в комплексные float
-            for (size_t i = 0; i < samples_read; i++) {
-                // Масштабирование 8-bit signed (-128..127) в float (-1.0..1.0)
-                float i_val = static_cast<float>(buff_8bit[i * 2]) / 128.0f;
-                float q_val = static_cast<float>(buff_8bit[i * 2 + 1]) / 128.0f;
-                
-                // Применяем битовый сдвиг если нужно
-                if (bit_shift > 0) {
-                    float scale = 1.0f / (1 << bit_shift);
-                    i_val *= scale;
-                    q_val *= scale;
-                }
-                
-                buff[i] = samp_type(i_val, q_val);
+        std::vector<samp_type> buff;
+
+        // Получаем буфер из очереди
+        {
+            std::unique_lock<std::mutex> lock(queue.mutex);
+            queue.cv.wait(lock, [&queue] {
+                return !queue.buffers.empty() || queue.finished || stop_signal_called;
+            });
+
+            if (stop_signal_called) break;
+
+            if (queue.buffers.empty()) {
+                if (queue.finished) break;
+                continue;
             }
-        } else {
-            // Читаем 16-битные IQ данные
-            std::vector<int16_t> buff_16bit(samps_per_buff * 2);
-            infile.read(reinterpret_cast<char*>(buff_16bit.data()), 
-                       buff_16bit.size() * sizeof(int16_t));
-            size_t values_read = infile.gcount() / sizeof(int16_t);
-            samples_read = values_read / 2;
-            
-            // Конвертируем 16-bit в комплексные float
-            for (size_t i = 0; i < samples_read; i++) {
-                // Масштабирование 16-bit signed (-32768..32767) в float (-1.0..1.0)
-                float i_val = static_cast<float>(buff_16bit[i * 2]) / 32768.0f;
-                float q_val = static_cast<float>(buff_16bit[i * 2 + 1]) / 32768.0f;
-                
-                // Применяем битовый сдвиг если нужно
-                if (bit_shift > 0) {
-                    float scale = 1.0f / (1 << bit_shift);
-                    i_val *= scale;
-                    q_val *= scale;
-                }
-                
-                buff[i] = samp_type(i_val, q_val);
-            }
+
+            buff = std::move(queue.buffers.front());
+            queue.buffers.pop();
         }
-        
-        // Если достигли конца файла
-        if (samples_read == 0 || infile.eof()) {
-            infile.clear();
-            infile.seekg(0, std::ios::beg);
-            std::cout << "* Файл закончился, начинаем сначала..." << std::endl;
-            continue;
-        }
-        
+        queue.cv.notify_one();
+
         // Отправляем данные
-        num_tx_samps = tx_stream->send(&buff.front(), samples_read, md);
-        if (num_tx_samps < samples_read) {
+        num_tx_samps = tx_stream->send(&buff.front(), buff.size(), md);
+        if (num_tx_samps < buff.size()) {
             std::cerr << "Отправлено меньше сэмплов чем запрошено" << std::endl;
         }
-        
+
         md.start_of_burst = false;
         total_samples += num_tx_samps;
-        
+
         // Статистика каждые 5 секунд
         auto now = std::chrono::steady_clock::now();
         auto time_passed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
         if (time_passed >= 5) {
             double rate = total_samples / static_cast<double>(time_passed) / 1e6;
-            std::cout << boost::format("Статистика: %.2f MS/s") % rate << std::endl;
+            size_t queue_size;
+            {
+                std::lock_guard<std::mutex> lock(queue.mutex);
+                queue_size = queue.buffers.size();
+            }
+            std::cout << boost::format("Статистика: %.2f MS/s (буферов в очереди: %d)")
+                % rate % queue_size << std::endl;
             start_time = now;
             total_samples = 0;
         }
     }
-    
+
+    // Останавливаем поток чтения
+    stop_signal_called = true;
+    queue.cv.notify_all();
+    reader.join();
+
     // Отправляем конец потока
     md.end_of_burst = true;
     tx_stream->send("", 0, md);
-    
-    infile.close();
 }
 
 int UHD_SAFE_MAIN(int argc, char* argv[])

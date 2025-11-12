@@ -10,10 +10,10 @@ LIBS = -luhd -lboost_system -lboost_thread -lboost_program_options -lpthread
 LDFLAGS = $(UHD_LIB_PATH) $(LIBS)
 
 # Имя исполняемого файла
-TARGET = uhd_sc8_tx_stream
+TARGET = usrp_player
 
 # Исходный файл
-SOURCE = uhd_sc8_tx_streaming.cpp
+SOURCE = usrp_player.cpp
 
 # Правило по умолчанию
 all: clean $(TARGET) check-libs

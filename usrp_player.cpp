@@ -131,6 +131,7 @@ void reader_thread(
         if (samples_read == 0 || infile.eof()) {
             infile.clear();
             infile.seekg(0, std::ios::beg);
+            std::cout << "* Файл закончился, начинаем сначала..." << std::endl;
             continue;
         }
 

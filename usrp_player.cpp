@@ -204,9 +204,10 @@ void send_from_file(
     size_t total_sent = 0;
     auto start_time = std::chrono::steady_clock::now();
     auto global_start = std::chrono::steady_clock::now();
+    int stats_lines = 0; // Счётчик строк статистики
+    const int max_lines = 5; // Максимум строк на экране
 
     std::cout << "* Начинаем передачу..." << std::endl;
-    std::cout << std::endl; // Пустая строка для статистики
 
     while (not stop_signal_called) {
         std::vector<samp_type> buff;
@@ -254,11 +255,24 @@ void send_from_file(
             auto total_time = std::chrono::duration_cast<std::chrono::seconds>(now - global_start).count();
             double total_gb = total_sent * sizeof(std::complex<float>) / 1e9;
 
-            // Затираем предыдущую строку и выводим новую статистику
-            std::cout << "\r\033[K"; // Очистить текущую строку
-            std::cout << boost::format("Скорость: %.2f MS/s | Буферов: %2d/32 | Всего: %.2f GB | Время: %d сек | Underrun: %d")
-                % rate % queue_size % total_gb % total_time % underrun_count;
+            // Если набралось max_lines строк, перемещаем курсор вверх и перезаписываем
+            if (stats_lines >= max_lines) {
+                // Перемещаем курсор на max_lines строк вверх
+                std::cout << "\033[" << max_lines << "F";
+                // Очищаем эти строки
+                for (int i = 0; i < max_lines; i++) {
+                    std::cout << "\033[K\n";
+                }
+                // Возвращаем курсор на max_lines строк вверх
+                std::cout << "\033[" << max_lines << "F";
+                stats_lines = 0;
+            }
+
+            // Выводим статистику
+            std::cout << boost::format("[%3d сек] Скорость: %.2f MS/s | Буферов: %2d/32 | Передано: %.2f GB | Underrun: %d\n")
+                % total_time % rate % queue_size % total_gb % underrun_count;
             std::cout << std::flush;
+            stats_lines++;
 
             start_time = now;
             total_samples = 0;

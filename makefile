@@ -3,24 +3,24 @@
 CXX = g++
 CXXFLAGS = -std=c++14 -O3 -march=native -Wall -Wextra
 
-UHD_INCLUDE = -I/usr/local/include
-UHD_LIB_PATH = -L/usr/local/lib -Wl,-rpath,/usr/local/lib
+UHD_INCLUDE = -I/usr/include
+UHD_LIB_PATH = -L/usr/lib/x86_64-linux-gnu -Wl,-rpath,/usr/lib/x86_64-linux-gnu
 
 LIBS = -luhd -lboost_system -lboost_thread -lboost_program_options -lpthread
 LDFLAGS = $(UHD_LIB_PATH) $(LIBS)
 
 # Имя исполняемого файла
-TARGET = uhd_sc8_tx_stream
+TARGET = usrp_player
 
 # Исходный файл
-SOURCE = uhd_sc8_tx_streaming.cpp
+SOURCE = usrp_player.cpp
 
 # Правило по умолчанию
 all: clean $(TARGET) check-libs
 
 # Компиляция
 $(TARGET): $(SOURCE)
-	@echo "Компиляция с UHD 4.8.0..."
+	@echo "Компиляция с UHD 4.9.0 и Boost 1.83.0..."
 	$(CXX) $(CXXFLAGS) $(UHD_INCLUDE) -o $(TARGET) $(SOURCE) $(LDFLAGS)
 	@echo "Компиляция завершена!"
 	
